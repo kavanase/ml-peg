@@ -526,3 +526,132 @@ sevennet-omni-mpa
     kwargs:
       model: "7net-omni"
       modal: "mpa"
+
+
+NequIP
+======
+
+Install these NequIP and Allegro foundation models with
+``uv sync --extra nequip`` (add ``--extra d3`` for benchmarks with a D3
+correction); the ``nequip`` extra cannot be combined with ``mace``. Each entry
+pins a Zenodo file by record and sha256, downloaded once to
+``~/.cache/ml_peg/nequip``. On first use on each type of CPU or GPU, the package
+is compiled with AOTInductor (``nequip-compile``, which needs a C++ compiler)
+and cached under ``~/.cache/ml_peg/nequip/compiled``. If compilation fails, the
+eager model is used with a warning, and a top-level ``compile: false`` (next to
+``device``) always uses it. The
+packages are float32 models, so both precisions use their native precision. The
+models are pre-trained on OMat24, fine-tuned on sAlex and MPtrj, and are
+CC-BY-4.0.
+
+nequip-oam-s-0p2
+----------------
+
+.. code-block:: yaml
+
+   nequip-oam-s-0p2:
+     module: nequip.integrations.ase
+     class_name: NequIPCalculator
+     datasets: [MPtrj, sAlex, OMAT]
+     device: "auto"
+     trained_on_dispersion: false
+     level_of_theory: PBE
+     kwargs:
+       model: "https://zenodo.org/api/records/22349749/files/NequIP-OAM-S-0.2.nequip.zip/content"
+       sha256: "5a3357b70c67cf497c718b785b2744f3405db14619e56f42a95cc6d372b00fea"
+
+nequip-oam-m-0p2
+----------------
+
+.. code-block:: yaml
+
+   nequip-oam-m-0p2:
+     module: nequip.integrations.ase
+     class_name: NequIPCalculator
+     datasets: [MPtrj, sAlex, OMAT]
+     device: "auto"
+     trained_on_dispersion: false
+     level_of_theory: PBE
+     kwargs:
+       model: "https://zenodo.org/api/records/22349749/files/NequIP-OAM-M-0.2.nequip.zip/content"
+       sha256: "5acc555985feda2857c91fa7095bb3bb3e1cdd67f3bed0d8668df812b87da409"
+
+nequip-oam-l-0p2
+----------------
+
+.. code-block:: yaml
+
+   nequip-oam-l-0p2:
+     module: nequip.integrations.ase
+     class_name: NequIPCalculator
+     datasets: [MPtrj, sAlex, OMAT]
+     device: "auto"
+     trained_on_dispersion: false
+     level_of_theory: PBE
+     kwargs:
+       model: "https://zenodo.org/api/records/22349749/files/NequIP-OAM-L-0.2.nequip.zip/content"
+       sha256: "ab0f1a8248e86fa6b0fb36899f072fc2e24966a9649c72d1b1fc2d5b0ebd3203"
+
+nequip-oam-xl-0p2
+-----------------
+
+.. code-block:: yaml
+
+   nequip-oam-xl-0p2:
+     module: nequip.integrations.ase
+     class_name: NequIPCalculator
+     datasets: [MPtrj, sAlex, OMAT]
+     device: "auto"
+     trained_on_dispersion: false
+     level_of_theory: PBE
+     kwargs:
+       model: "https://zenodo.org/api/records/22349749/files/NequIP-OAM-XL-0.2.nequip.zip/content"
+       sha256: "b064eacf17d9c2625ce2f4e432517b106044ea2dee14142273622b75c93a01d6"
+
+allegro-oam-s-0p2
+-----------------
+
+.. code-block:: yaml
+
+   allegro-oam-s-0p2:
+     module: nequip.integrations.ase
+     class_name: NequIPCalculator
+     datasets: [MPtrj, sAlex, OMAT]
+     device: "auto"
+     trained_on_dispersion: false
+     level_of_theory: PBE
+     kwargs:
+       model: "https://zenodo.org/api/records/22349749/files/Allegro-OAM-S-0.2.nequip.zip/content"
+       sha256: "6ce4bb1db4076b4176cb63bae2eaae091ec499660227530a0071153bfdc62a4d"
+
+allegro-oam-m-0p2
+-----------------
+
+.. code-block:: yaml
+
+   allegro-oam-m-0p2:
+     module: nequip.integrations.ase
+     class_name: NequIPCalculator
+     datasets: [MPtrj, sAlex, OMAT]
+     device: "auto"
+     trained_on_dispersion: false
+     level_of_theory: PBE
+     kwargs:
+       model: "https://zenodo.org/api/records/22349749/files/Allegro-OAM-M-0.2.nequip.zip/content"
+       sha256: "1e4a94a75ead37625eadca53efbbc5e82396deb145c44203bdb9e91aaf0646e4"
+
+allegro-oam-l-0p2
+-----------------
+
+.. code-block:: yaml
+
+   allegro-oam-l-0p2:
+     module: nequip.integrations.ase
+     class_name: NequIPCalculator
+     datasets: [MPtrj, sAlex, OMAT]
+     device: "auto"
+     trained_on_dispersion: false
+     level_of_theory: PBE
+     kwargs:
+       model: "https://zenodo.org/api/records/22349749/files/Allegro-OAM-L-0.2.nequip.zip/content"
+       sha256: "0396734c4aa6d9782a9122acb4e7220f693ab7a327e2c457490ab01015ed9af1"

@@ -267,6 +267,30 @@ constituents are also listed individually so their known domains and element
 coverage remain visible. Its coverage entry is the verified union of its
 constituent datasets, not the checkpoint's broader executable type map.
 
+NequIP and Allegro entries use the dedicated ``NequIPCalc`` wrapper, selected by
+the ``NequIPCalculator`` class name. ``kwargs.model`` is a local ``.nequip.zip``
+package or an ``https://`` URL, which is downloaded once to
+``~/.cache/ml_peg/nequip`` and checked against ``kwargs.sha256``. On first use on
+each type of CPU or GPU, the package is compiled with AOTInductor and cached;
+structures with fewer than two atoms or edges, which compiled models do not
+support, use the eager model. Set a top-level ``compile: false`` (next to
+``device``) to always use the eager model. Packaged models fix their dtype (float32 for the OAM models), so
+``precision`` is ignored. Install with ``uv sync --extra nequip --extra d3``; the
+``nequip`` extra conflicts with ``mace``:
+
+.. code-block:: yaml
+
+   nequip-oam-s-0p2:
+     module: nequip.integrations.ase
+     class_name: NequIPCalculator
+     datasets: [MPtrj, sAlex, OMAT]
+     device: auto
+     trained_on_dispersion: false
+     level_of_theory: PBE
+     kwargs:
+       model: https://zenodo.org/api/records/22349749/files/NequIP-OAM-S-0.2.nequip.zip/content
+       sha256: 5a3357b70c67cf497c718b785b2744f3405db14619e56f42a95cc6d372b00fea
+
 GRACE, SevenNet, MatterSim and Vivace entries similarly select their wrappers
 through ``class_name`` (``grace_fm``, ``SevenNetCalculator``,
 ``MatterSimCalculator`` and ``MLFFCalculator`` respectively).
