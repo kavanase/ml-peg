@@ -536,13 +536,18 @@ Install these NequIP and Allegro foundation models with
 correction); the ``nequip`` extra cannot be combined with ``mace``. Each entry
 pins a Zenodo file by record and sha256, downloaded once to
 ``~/.cache/ml_peg/nequip``. On first use on each type of CPU or GPU, the package
-is compiled with AOTInductor (``nequip-compile``, which needs a C++ compiler)
-and cached under ``~/.cache/ml_peg/nequip/compiled``. If compilation fails, the
-eager model is used with a warning, and a top-level ``compile: false`` (next to
-``device``) always uses it. The
-packages are float32 models, so both precisions use their native precision. The
-models are pre-trained on OMat24, fine-tuned on sAlex and MPtrj, and are
-CC-BY-4.0.
+is compiled with ``nequip-compile`` (which needs a C++ compiler) and cached under
+``~/.cache/ml_peg/nequip/compiled``. On CUDA GPUs, NequIP models are compiled with
+OpenEquivariance kernels and Allegro models with cuEquivariance kernels, which the
+``nequip`` extra installs on Linux (its CUDA 12 build of the cuEquivariance
+kernels shares files with the CUDA 13 build in the ``vivace`` extra, so install
+those extras in separate environments). NequIP models fall back to cuEquivariance,
+then each model to AOTInductor without GPU kernels. Each GPU kernel build is
+checked against the eager model before use. If compilation fails, the eager model
+is used with a warning, and a top-level ``compile: false`` (next to ``device``)
+always uses it. The packages are float32 models, so both precisions use their
+native precision. The models are pre-trained on OMat24, fine-tuned on sAlex and
+MPtrj, and are CC-BY-4.0.
 
 nequip-oam-s-0p2
 ----------------

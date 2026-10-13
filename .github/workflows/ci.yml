@@ -73,7 +73,8 @@ jobs:
           python-version: "3.12"
 
       - name: Install NequIP dependencies
-        run: uv sync --extra nequip
+        # OpenEquivariance builds from source and is only used on GPUs
+        run: uv sync --extra nequip --no-install-package openequivariance
 
       - name: Run NequIP tests
         run: uv run --no-sync pytest tests/test_nequip_models.py

@@ -76,6 +76,10 @@ mlipaudit = [
 ]
 nequip = [
     "nequip == 0.19.1",
+    # GPU kernels, used automatically on CUDA
+    "openequivariance == 0.7.0; sys_platform == 'linux'",
+    "cuequivariance-torch == 0.8.1; sys_platform == 'linux'",
+    "cuequivariance-ops-torch-cu12 == 0.8.1; sys_platform == 'linux'",
 ]
 orb = [
     "orb-models == 0.6.2; sys_platform != 'win32' and python_version >= '3.12'",

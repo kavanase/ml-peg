@@ -6,6 +6,8 @@ import contextlib
 import copy
 import dataclasses
 import hashlib
+import importlib.metadata
+import importlib.util
 from pathlib import Path
 import pickle
 import platform
@@ -15,6 +17,7 @@ from types import ModuleType, SimpleNamespace
 
 from ase import Atoms
 from ase.build import bulk
+from ase.calculators.lj import LennardJones
 from ase.data import chemical_symbols
 from mlipx.nodes.generic_ase import Device
 import numpy as np
@@ -114,11 +117,15 @@ def fake_nequip(monkeypatch):
     )
     dtype_module = ModuleType("nequip.utils.dtype")
     dtype_module.torch_default_dtype = _torch_default_dtype
+    modify_module = ModuleType("nequip.model.modify_utils")
+    modify_module.get_all_modifiers = lambda model: {}
     fake_modules = {
         "nequip": _fake_nequip_module(),
         "nequip.data": data_module,
         "nequip.integrations": ModuleType("nequip.integrations"),
         "nequip.integrations.ase": ase_module,
+        "nequip.model": ModuleType("nequip.model"),
+        "nequip.model.modify_utils": modify_module,
         "nequip.utils": ModuleType("nequip.utils"),
         "nequip.utils.dtype": dtype_module,
     }
@@ -131,8 +138,8 @@ def fake_nequip(monkeypatch):
         calls["downloads"].append((url, sha256))
         return "cached.nequip.zip"
 
-    def compile_package(model, device):
-        calls["compiles"].append((model, device))
+    def compile_package(model, device, mode="aotinductor", modifiers=()):
+        calls["compiles"].append((model, device, mode, modifiers))
         return "compiled.nequip.pt2"
 
     monkeypatch.setattr(models, "_download_nequip_package", download)
@@ -200,7 +207,7 @@ def test_nequip_loads_compiled_package_once(fake_nequip, precision):
     device = Device.resolve_auto()
     options = {"device": device, "chemical_species_to_atom_type_map": True}
     assert fake_nequip["downloads"] == [(kwargs["model"], kwargs["sha256"])] * 2
-    assert fake_nequip["compiles"] == [("cached.nequip.zip", device)]
+    assert fake_nequip["compiles"] == [("cached.nequip.zip", device, "aotinductor", ())]
     assert _FakeNequIPCalculator.loads == [
         ("eager", "cached.nequip.zip", options),
         ("compiled", "compiled.nequip.pt2", options),
@@ -228,15 +235,17 @@ def test_nequip_runs_small_structures_eagerly(fake_nequip):
 def test_nequip_uses_eager_model_if_compiling_fails(fake_nequip, monkeypatch):
     """A failed compilation warns and returns the eager calculator."""
 
-    def fail(model, device):
+    def fail(model, device, mode, modifiers):
         raise subprocess.CalledProcessError(1, "nequip-compile", stderr="no compiler")
 
     monkeypatch.setattr(models, "_compile_nequip_package", fail)
     model = NequIPCalc(kwargs={"model": "local.nequip.zip"})
 
-    with pytest.warns(UserWarning, match="no compiler"):
+    with pytest.warns(UserWarning) as warnings:
         calc = model.get_calculator(precision="high")
     assert calc.source == "eager"
+    assert "no compiler" in str(warnings[0].message)
+    assert "Using the eager NequIP model" in str(warnings[-1].message)
 
 
 def test_nequip_compilation_can_be_disabled(fake_nequip):
@@ -304,22 +313,24 @@ def test_compile_caches_by_package_and_hardware(monkeypatch, tmp_path):
 
     package = tmp_path / "model.nequip.zip"
     package.write_bytes(b"package")
-    commands = []
+    runs = []
 
     def run(command, **kwargs):
-        commands.append(command)
+        runs.append((command, kwargs["env"]))
         Path(command[4]).write_bytes(b"compiled")
 
     monkeypatch.setitem(sys.modules, "nequip", _fake_nequip_module())
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.delenv("ATEN_CPU_CAPABILITY", raising=False)
     monkeypatch.setattr(subprocess, "run", run)
 
     path = Path(models._compile_nequip_package(str(package), "cpu"))
     assert models._compile_nequip_package(str(package), "cpu") == str(path)
 
-    assert len(commands) == 1
-    assert commands[0][1:4] == ["-m", "nequip.scripts.compile", str(package)]
-    assert commands[0][5:] == [
+    assert len(runs) == 1
+    command, env = runs[0]
+    assert command[1:4] == ["-m", "nequip.scripts.compile", str(package)]
+    assert command[5:] == [
         "--mode",
         "aotinductor",
         "--device",
@@ -327,12 +338,122 @@ def test_compile_caches_by_package_and_hardware(monkeypatch, tmp_path):
         "--target",
         "ase",
     ]
-    assert path.name.startswith(f"{hashlib.sha256(b'package').hexdigest()}-cpu-")
+    # Scalar C++ codegen on Linux only, where it is faster
+    simd = "default" if sys.platform == "linux" else "auto"
+    assert env.get("ATEN_CPU_CAPABILITY", "auto") == simd
+    assert path.name.startswith(f"{hashlib.sha256(b'package').hexdigest()[:16]}-cpu-")
     assert f"-cpu-{platform.machine()}-" in path.name
-    assert path.name.endswith(f"-torch{torch.__version__}-nequip0.0.0.nequip.pt2")
+    assert f"-simd_{simd}-" in path.name
+    assert path.name.endswith(
+        f"-aotinductor-torch{torch.__version__}-nequip0.0.0.nequip.pt2"
+    )
     assert path.read_bytes() == b"compiled"
     files = [file.name for file in path.parent.iterdir()]
     assert [name for name in files if not name.endswith(".lock")] == [path.name]
+
+
+def test_compile_skips_kernel_variants_that_failed(monkeypatch, tmp_path):
+    """A failed GPU-kernel compile is recorded and not retried; plain ones are."""
+    package = tmp_path / "model.nequip.zip"
+    package.write_bytes(b"package")
+    runs = []
+
+    def run(command, **kwargs):
+        runs.append(command)
+        raise subprocess.CalledProcessError(1, command, stderr="no nvcc")
+
+    monkeypatch.setitem(sys.modules, "nequip", _fake_nequip_module())
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setattr(subprocess, "run", run)
+    monkeypatch.setattr(importlib.metadata, "version", lambda name: "1.0")
+    kernel = ("torchscript", ("enable_OpenEquivariance",))
+
+    with pytest.raises(subprocess.CalledProcessError):
+        models._compile_nequip_package(str(package), "cpu", *kernel)
+    assert runs[-1][-2:] == ["--modifiers", "enable_OpenEquivariance"]
+    with pytest.raises(RuntimeError, match="compiling failed before"):
+        models._compile_nequip_package(str(package), "cpu", *kernel)
+    (failed,) = (tmp_path / ".cache" / "ml_peg" / "nequip" / "compiled").glob(
+        "*.failed"
+    )
+    assert "openequivariance1.0" in failed.name
+    assert failed.read_text() == "no nvcc"
+
+    for _ in range(2):
+        with pytest.raises(subprocess.CalledProcessError):
+            models._compile_nequip_package(str(package), "cpu")
+    assert len(runs) == 3
+
+
+def test_nequip_compile_variants(monkeypatch):
+    """GPU kernels are tried first on CUDA, when installed, then plain AOTInductor."""
+    import torch
+
+    nequip = {"enable_OpenEquivariance", "enable_CuEquivariance"}
+    allegro = {"enable_CuEquivarianceContracter", "enable_TritonContracter"}
+    plain = ("aotinductor", ())
+    installed = {"openequivariance", "cuequivariance_torch"}
+    monkeypatch.setattr(importlib.util, "find_spec", lambda name: name in installed)
+    monkeypatch.setattr(torch, "__version__", "2.8.0+cu128")
+
+    assert models._nequip_compile_variants(nequip, "cpu") == [plain]
+    assert models._nequip_compile_variants(nequip, "cuda") == [
+        ("torchscript", ("enable_OpenEquivariance",)),
+        ("aotinductor", ("enable_CuEquivariance",)),
+        plain,
+    ]
+    assert models._nequip_compile_variants(allegro, "cuda") == [
+        ("aotinductor", ("enable_CuEquivarianceContracter",)),
+        plain,
+    ]
+    monkeypatch.setattr(torch, "__version__", "2.10.0")
+    assert models._nequip_compile_variants(nequip, "cuda")[0] == (
+        "aotinductor",
+        ("enable_OpenEquivariance",),
+    )
+    installed.clear()
+    assert models._nequip_compile_variants(nequip | allegro, "cuda") == [plain]
+
+
+def test_nequip_falls_back_from_failed_gpu_kernels(fake_nequip, monkeypatch):
+    """Kernel variants that fail, or change the results, fall back to plain ones."""
+    checks = []
+
+    def check(compiled, eager):
+        checks.append((compiled.source, eager.source))
+        raise RuntimeError("the GPU kernels change the energy")
+
+    variants = [
+        ("torchscript", ("enable_OpenEquivariance",)),
+        ("aotinductor", ("enable_CuEquivariance",)),
+        ("aotinductor", ()),
+    ]
+    monkeypatch.setitem(sys.modules, "openequivariance", ModuleType("openequivariance"))
+    # Fail to import cuEquivariance, whether or not it is installed
+    monkeypatch.setitem(sys.modules, "cuequivariance_torch", None)
+    monkeypatch.setattr(models, "_nequip_compile_variants", lambda *args: variants)
+    monkeypatch.setattr(models, "_check_nequip_kernels", check)
+    model = NequIPCalc(kwargs={"model": "local.nequip.zip"})
+
+    with pytest.warns(UserWarning) as warnings:
+        calc = model.get_calculator(precision="high")
+
+    assert calc.source == "compiled"
+    assert [compile[2:] for compile in fake_nequip["compiles"]] == [
+        variants[0],
+        variants[2],
+    ]
+    assert checks == [("compiled", "eager")]
+    messages = [str(warning.message) for warning in warnings]
+    assert "change the energy" in messages[0]
+    assert "cuequivariance_torch" in messages[1]
+
+
+def test_check_nequip_kernels():
+    """Kernels must reproduce the eager energy and forces to 1 meV and 1 meV/A."""
+    models._check_nequip_kernels(LennardJones(), LennardJones())
+    with pytest.raises(RuntimeError, match="change the energy"):
+        models._check_nequip_kernels(LennardJones(epsilon=1.1), LennardJones())
 
 
 def test_nequip_oam_s_compiled_matches_eager():
