@@ -6,8 +6,7 @@ import contextlib
 import copy
 import dataclasses
 import hashlib
-import importlib.metadata
-import importlib.util
+import json
 from pathlib import Path
 import pickle
 import platform
@@ -72,9 +71,6 @@ class _FakeNequIPCalculator:
     def __init__(self, source):
         self.source = source
 
-    def calculate(self, *args, **kwargs):
-        """Stand in for the real ``calculate``."""
-
     def call_model(self, data):
         """Report which model evaluated ``data``."""
         return self.source
@@ -85,7 +81,7 @@ class _FakeNequIPCalculator:
 
     @classmethod
     def _from_saved_model(cls, model_path, **kwargs):
-        """Record an eager load, making float64 the default as nequip does."""
+        """Record an eager load, making float64 the default like nequip's first load."""
         import torch
 
         torch.set_default_dtype(torch.float64)
@@ -113,7 +109,8 @@ def fake_nequip(monkeypatch):
     ase_module.NequIPCalculator = _FakeNequIPCalculator
     data_module = ModuleType("nequip.data")
     data_module.AtomicDataDict = SimpleNamespace(
-        POSITIONS_KEY="pos", EDGE_INDEX_KEY="edge_index"
+        num_nodes=lambda data: len(data["pos"]),
+        num_edges=lambda data: data["edge_index"].shape[1],
     )
     dtype_module = ModuleType("nequip.utils.dtype")
     dtype_module.torch_default_dtype = _torch_default_dtype
@@ -138,8 +135,8 @@ def fake_nequip(monkeypatch):
         calls["downloads"].append((url, sha256))
         return "cached.nequip.zip"
 
-    def compile_package(model, device, mode="aotinductor", modifiers=()):
-        calls["compiles"].append((model, device, mode, modifiers))
+    def compile_package(model, device, mode="aotinductor", modifier=None):
+        calls["compiles"].append((model, device, mode, modifier))
         return "compiled.nequip.pt2"
 
     monkeypatch.setattr(models, "_download_nequip_package", download)
@@ -170,7 +167,7 @@ def test_nequip_registry_metadata():
 def test_nequip_registry_records_package_elements():
     """The registry datasets cover exactly the 89 atom types of the OAM packages."""
     registry = _registry()
-    coverage = yaml.safe_load(
+    coverage = json.loads(
         (ROOT / "ml_peg" / "app" / "data" / "element_coverage.json").read_text(
             encoding="utf8"
         )
@@ -207,7 +204,9 @@ def test_nequip_loads_compiled_package_once(fake_nequip, precision):
     device = Device.resolve_auto()
     options = {"device": device, "chemical_species_to_atom_type_map": True}
     assert fake_nequip["downloads"] == [(kwargs["model"], kwargs["sha256"])] * 2
-    assert fake_nequip["compiles"] == [("cached.nequip.zip", device, "aotinductor", ())]
+    assert fake_nequip["compiles"] == [
+        ("cached.nequip.zip", device, "aotinductor", None)
+    ]
     assert _FakeNequIPCalculator.loads == [
         ("eager", "cached.nequip.zip", options),
         ("compiled", "compiled.nequip.pt2", options),
@@ -235,7 +234,7 @@ def test_nequip_runs_small_structures_eagerly(fake_nequip):
 def test_nequip_uses_eager_model_if_compiling_fails(fake_nequip, monkeypatch):
     """A failed compilation warns and returns the eager calculator."""
 
-    def fail(model, device, mode, modifiers):
+    def fail(model, device, mode, modifier):
         raise subprocess.CalledProcessError(1, "nequip-compile", stderr="no compiler")
 
     monkeypatch.setattr(models, "_compile_nequip_package", fail)
@@ -256,7 +255,7 @@ def test_nequip_compilation_can_be_disabled(fake_nequip):
     assert fake_nequip["compiles"] == []
 
 
-def test_nequip_rejects_unknown_precision(fake_nequip):
+def test_nequip_rejects_unknown_precision():
     """The NequIP wrapper rejects unknown ML-PEG precision choices."""
     model = NequIPCalc(kwargs={"model": "model.nequip.zip"})
 
@@ -279,18 +278,9 @@ def test_download_checks_sha256_and_caches(monkeypatch, tmp_path):
     sha256 = hashlib.sha256(content).hexdigest()
     calls = []
 
-    class Response:
-        """Minimal stand-in for a ``requests`` response."""
-
-        def __init__(self):
-            self.content = content
-
-        def raise_for_status(self):
-            """Report no HTTP error."""
-
     def get(url, timeout):
         calls.append(url)
-        return Response()
+        return SimpleNamespace(content=content, raise_for_status=lambda: None)
 
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setattr(requests, "get", get)
@@ -308,7 +298,7 @@ def test_download_checks_sha256_and_caches(monkeypatch, tmp_path):
 
 
 def test_compile_caches_by_package_and_hardware(monkeypatch, tmp_path):
-    """Packages compile once per package, device, hardware and software version."""
+    """Packages compile once per package, device, hardware, threads and versions."""
     import torch
 
     package = tmp_path / "model.nequip.zip"
@@ -338,18 +328,27 @@ def test_compile_caches_by_package_and_hardware(monkeypatch, tmp_path):
         "--target",
         "ase",
     ]
-    # Scalar C++ codegen on Linux only, where it is faster
-    simd = "default" if sys.platform == "linux" else "auto"
-    assert env.get("ATEN_CPU_CAPABILITY", "auto") == simd
+    # Scalar C++ codegen on every CPU
+    assert env["ATEN_CPU_CAPABILITY"] == "default"
     assert path.name.startswith(f"{hashlib.sha256(b'package').hexdigest()[:16]}-cpu-")
     assert f"-cpu-{platform.machine()}-" in path.name
-    assert f"-simd_{simd}-" in path.name
+    assert "-simd_default-" in path.name
+    threads = torch.get_num_threads()
+    assert env["OMP_NUM_THREADS"] == str(threads)
+    assert f"-threads{threads}-" in path.name
     assert path.name.endswith(
         f"-aotinductor-torch{torch.__version__}-nequip0.0.0.nequip.pt2"
     )
     assert path.read_bytes() == b"compiled"
     files = [file.name for file in path.parent.iterdir()]
     assert [name for name in files if not name.endswith(".lock")] == [path.name]
+
+    # Compiled kernels keep their thread count, so other counts compile separately
+    monkeypatch.setattr(torch, "get_num_threads", lambda: threads + 1)
+    other = models._compile_nequip_package(str(package), "cpu")
+    assert other == str(path).replace(f"-threads{threads}-", f"-threads{threads + 1}-")
+    assert len(runs) == 2
+    assert runs[1][1]["OMP_NUM_THREADS"] == str(threads + 1)
 
 
 def test_compile_skips_kernel_variants_that_failed(monkeypatch, tmp_path):
@@ -365,8 +364,8 @@ def test_compile_skips_kernel_variants_that_failed(monkeypatch, tmp_path):
     monkeypatch.setitem(sys.modules, "nequip", _fake_nequip_module())
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setattr(subprocess, "run", run)
-    monkeypatch.setattr(importlib.metadata, "version", lambda name: "1.0")
-    kernel = ("torchscript", ("enable_OpenEquivariance",))
+    monkeypatch.setattr(models, "version", lambda name: "1.0")
+    kernel = ("torchscript", "enable_OpenEquivariance")
 
     with pytest.raises(subprocess.CalledProcessError):
         models._compile_nequip_package(str(package), "cpu", *kernel)
@@ -391,25 +390,25 @@ def test_nequip_compile_variants(monkeypatch):
 
     nequip = {"enable_OpenEquivariance", "enable_CuEquivariance"}
     allegro = {"enable_CuEquivarianceContracter", "enable_TritonContracter"}
-    plain = ("aotinductor", ())
+    plain = ("aotinductor", None)
     installed = {"openequivariance", "cuequivariance_torch"}
-    monkeypatch.setattr(importlib.util, "find_spec", lambda name: name in installed)
+    monkeypatch.setattr(models, "find_spec", lambda name: name in installed)
     monkeypatch.setattr(torch, "__version__", "2.8.0+cu128")
 
     assert models._nequip_compile_variants(nequip, "cpu") == [plain]
     assert models._nequip_compile_variants(nequip, "cuda") == [
-        ("torchscript", ("enable_OpenEquivariance",)),
-        ("aotinductor", ("enable_CuEquivariance",)),
+        ("torchscript", "enable_OpenEquivariance"),
+        ("aotinductor", "enable_CuEquivariance"),
         plain,
     ]
     assert models._nequip_compile_variants(allegro, "cuda") == [
-        ("aotinductor", ("enable_CuEquivarianceContracter",)),
+        ("aotinductor", "enable_CuEquivarianceContracter"),
         plain,
     ]
     monkeypatch.setattr(torch, "__version__", "2.10.0")
     assert models._nequip_compile_variants(nequip, "cuda")[0] == (
         "aotinductor",
-        ("enable_OpenEquivariance",),
+        "enable_OpenEquivariance",
     )
     installed.clear()
     assert models._nequip_compile_variants(nequip | allegro, "cuda") == [plain]
@@ -424,9 +423,9 @@ def test_nequip_falls_back_from_failed_gpu_kernels(fake_nequip, monkeypatch):
         raise RuntimeError("the GPU kernels change the energy")
 
     variants = [
-        ("torchscript", ("enable_OpenEquivariance",)),
-        ("aotinductor", ("enable_CuEquivariance",)),
-        ("aotinductor", ()),
+        ("torchscript", "enable_OpenEquivariance"),
+        ("aotinductor", "enable_CuEquivariance"),
+        ("aotinductor", None),
     ]
     monkeypatch.setitem(sys.modules, "openequivariance", ModuleType("openequivariance"))
     # Fail to import cuEquivariance, whether or not it is installed
@@ -456,6 +455,8 @@ def test_check_nequip_kernels():
         models._check_nequip_kernels(LennardJones(epsilon=1.1), LennardJones())
 
 
+# Failed compilation falls back to the eager model with this warning
+@pytest.mark.filterwarnings("error:Using the eager NequIP model")
 def test_nequip_oam_s_compiled_matches_eager():
     """The compiled OAM-S package matches the eager model, including tiny structures."""
     torch = pytest.importorskip("torch")
@@ -467,8 +468,6 @@ def test_nequip_oam_s_compiled_matches_eager():
     eager = dataclasses.replace(model, compile=False).get_calculator(precision="high")
 
     assert torch.get_default_dtype() == default_dtype
-    # Failed compilation falls back to eager with a warning, so check it compiled
-    assert type(compiled.model).__name__ == "DictInputOutputWrapper"
     assert eager.model.metadata["model_dtype"] == "float32"
     assert set(eager.model.metadata["type_names"].split()) == OAM_ELEMENTS
 

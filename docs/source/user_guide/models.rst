@@ -533,21 +533,27 @@ NequIP
 
 Install these NequIP and Allegro foundation models with
 ``uv sync --extra nequip`` (add ``--extra d3`` for benchmarks with a D3
-correction); the ``nequip`` extra cannot be combined with ``mace``. Each entry
-pins a Zenodo file by record and sha256, downloaded once to
+correction). The ``nequip`` extra cannot be combined with ``mace``, and needs a
+separate environment from ``vivace``, as their CUDA 12 and CUDA 13 builds of the
+cuEquivariance kernels share files. On Linux, it builds OpenEquivariance from
+source, which needs a C/C++ compiler and downloads LibTorch; on machines without
+a CUDA GPU, add ``--no-install-package openequivariance``.
+
+Each entry pins a Zenodo file by record and sha256, downloaded once to
 ``~/.cache/ml_peg/nequip``. On first use on each type of CPU or GPU, the package
-is compiled with ``nequip-compile`` (which needs a C++ compiler) and cached under
-``~/.cache/ml_peg/nequip/compiled``. On CUDA GPUs, NequIP models are compiled with
-OpenEquivariance kernels and Allegro models with cuEquivariance kernels, which the
-``nequip`` extra installs on Linux (its CUDA 12 build of the cuEquivariance
-kernels shares files with the CUDA 13 build in the ``vivace`` extra, so install
-those extras in separate environments). NequIP models fall back to cuEquivariance,
-then each model to AOTInductor without GPU kernels. Each GPU kernel build is
-checked against the eager model before use. If compilation fails, the eager model
-is used with a warning, and a top-level ``compile: false`` (next to ``device``)
-always uses it. The packages are float32 models, so both precisions use their
-native precision. The models are pre-trained on OMat24, fine-tuned on sAlex and
-MPtrj, and are CC-BY-4.0.
+is compiled with ``nequip-compile`` (which needs a C++ compiler) and cached
+under ``~/.cache/ml_peg/nequip/compiled``. Compiled CPU models keep the number
+of threads they were compiled with, so a model is compiled for each thread count
+(set with ``OMP_NUM_THREADS``). On CUDA GPUs, NequIP models use OpenEquivariance
+kernels, falling back to cuEquivariance, and Allegro models use cuEquivariance
+kernels. With torch < 2.10, OpenEquivariance also compiles its kernels on first
+use, which needs a CUDA toolkit. Each GPU kernel build is checked against the
+eager model before use, and one that fails to compile is recorded as a
+``.failed`` file next to the cached models and skipped until that file is
+deleted. If compilation fails, the eager model is used with a warning, and a
+top-level ``compile: false`` (next to ``device``) always uses it. The packages
+are float32 models, so both precisions use their native precision. The models
+are pre-trained on OMat24, fine-tuned on sAlex and MPtrj, and are CC-BY-4.0.
 
 nequip-oam-s-0p2
 ----------------

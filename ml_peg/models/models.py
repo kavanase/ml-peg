@@ -7,7 +7,18 @@ from __future__ import annotations
 import copy
 import dataclasses
 from functools import cache, wraps
+import hashlib
+from importlib import import_module
+from importlib.metadata import version
+from importlib.util import find_spec
 import json
+import os
+from pathlib import Path
+import platform
+import re
+import subprocess
+import sys
+import tempfile
 from typing import TYPE_CHECKING, Any, Literal, get_args
 from warnings import warn
 
@@ -83,44 +94,6 @@ def _patch_metatomic_nvalchemi_max_neighbors() -> None:
     )
 
 
-def _float64_nequip_calculator() -> type:
-    """
-    Return a ``NequIPCalculator`` subclass that builds its inputs in float64.
-
-    NequIP keeps its data (positions, cell) in float64 and runs the model in the
-    package's ``model_dtype``. ``NequIPCalculator`` builds the data with
-    ``torch.get_default_dtype()``, relying on nequip making float64 the process-wide
-    default, which ML-PEG restores after loading so that other models are unaffected.
-
-    Returns
-    -------
-    type
-        The ``NequIPCalculator`` subclass.
-    """
-    from nequip.integrations.ase import NequIPCalculator
-    from nequip.utils.dtype import torch_default_dtype
-    import torch
-
-    class Float64NequIPCalculator(NequIPCalculator):
-        """``NequIPCalculator`` that builds its inputs in float64."""
-
-        def calculate(self, *args: Any, **kwargs: Any) -> None:
-            """
-            Run ``NequIPCalculator.calculate`` with float64 as torch's default dtype.
-
-            Parameters
-            ----------
-            *args
-                Positional arguments for ``NequIPCalculator.calculate``.
-            **kwargs
-                Keyword arguments for ``NequIPCalculator.calculate``.
-            """
-            with torch_default_dtype(torch.float64):
-                super().calculate(*args, **kwargs)
-
-    return Float64NequIPCalculator
-
-
 # Packages providing the GPU kernels of each nequip modifier, in order of preference
 _NEQUIP_KERNEL_PACKAGES = {
     "enable_OpenEquivariance": "openequivariance",
@@ -152,10 +125,6 @@ def _download_nequip_package(url: str, sha256: str | None) -> str:
     ValueError
         If the downloaded file does not match ``sha256``.
     """
-    import hashlib
-    from pathlib import Path
-    import tempfile
-
     import requests
 
     # nequip only treats files ending in .nequip.zip as packages
@@ -163,8 +132,11 @@ def _download_nequip_package(url: str, sha256: str | None) -> str:
     if not path.exists():
         response = requests.get(url, timeout=60)
         response.raise_for_status()
-        if hashlib.sha256(response.content).hexdigest() != sha256:
-            raise ValueError(f"Checksum mismatch for {url}")
+        actual = hashlib.sha256(response.content).hexdigest()
+        if actual != sha256:
+            raise ValueError(
+                f"Checksum mismatch for {url}: expected {sha256}, got {actual}"
+            )
         path.parent.mkdir(parents=True, exist_ok=True)
         with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as file:
             file.write(response.content)
@@ -175,7 +147,7 @@ def _download_nequip_package(url: str, sha256: str | None) -> str:
 
 def _nequip_compile_variants(
     modifiers: set[str], device: str
-) -> list[tuple[str, tuple[str, ...]]]:
+) -> list[tuple[str, str | None]]:
     """
     List the ways to compile a NequIP package for a device, fastest first.
 
@@ -192,31 +164,28 @@ def _nequip_compile_variants(
 
     Returns
     -------
-    list[tuple[str, tuple[str, ...]]]
-        ``nequip-compile`` mode and modifiers of each variant.
+    list[tuple[str, str | None]]
+        ``nequip-compile`` mode and GPU kernel modifier (or ``None``) of each variant.
     """
-    from importlib.util import find_spec
-
     import torch
 
     variants = []
     if torch.device(device).type == "cuda":
         torch_version = tuple(int(part) for part in torch.__version__.split(".")[:2])
-        # OpenEquivariance needs torch 2.9 for AOTInductor, so use TorchScript (which
-        # torch 2.10 drops) before then
-        oeq = "aotinductor" if torch_version >= (2, 9) else "torchscript"
-        modes = {"enable_OpenEquivariance": oeq}
         for modifier, package in _NEQUIP_KERNEL_PACKAGES.items():
             if modifier in modifiers and find_spec(package):
-                variants.append((modes.get(modifier, "aotinductor"), (modifier,)))
-    return [*variants, ("aotinductor", ())]
+                # OpenEquivariance needs torch 2.9 for AOTInductor, so use TorchScript
+                # (which torch 2.10 drops) before then
+                old = modifier == "enable_OpenEquivariance" and torch_version < (2, 9)
+                variants.append(("torchscript" if old else "aotinductor", modifier))
+    return [*variants, ("aotinductor", None)]
 
 
 def _compile_nequip_package(
-    model: str, device: str, mode: str = "aotinductor", modifiers: tuple[str, ...] = ()
+    model: str, device: str, mode: str = "aotinductor", modifier: str | None = None
 ) -> str:
     """
-    Compile a NequIP package once per machine type, returning the compiled file.
+    Compile a NequIP package once per machine type and thread count, returning the file.
 
     Parameters
     ----------
@@ -226,10 +195,10 @@ def _compile_nequip_package(
         Device to compile for, which the compiled model must then be loaded on.
     mode
         ``nequip-compile`` mode, ``aotinductor`` or ``torchscript``.
-    modifiers
-        GPU kernel modifiers to compile with. If compiling with them fails, later
-        calls raise without retrying until the ``.failed`` file beside the cached
-        model is deleted.
+    modifier
+        GPU kernel modifier to compile with. If compiling with it fails, later calls
+        raise without retrying until the ``.failed`` file beside the cached model is
+        deleted.
 
     Returns
     -------
@@ -239,37 +208,26 @@ def _compile_nequip_package(
     Raises
     ------
     RuntimeError
-        If compiling with ``modifiers`` failed before.
+        If compiling with ``modifier`` failed before.
     """
-    import hashlib
-    from importlib.metadata import version
-    import os
-    from pathlib import Path
-    import platform
-    import re
-    import subprocess
-    import sys
-    import tempfile
-
     from filelock import FileLock
     import nequip
     import torch
 
-    digest = hashlib.sha256()
-    with open(model, "rb") as file:
-        for chunk in iter(lambda: file.read(1 << 20), b""):
-            digest.update(chunk)
     env = dict(os.environ)
     # Compiled code is specific to the CPU's instruction set or the GPU model
     if torch.device(device).type == "cuda":
         hardware = torch.cuda.get_device_name(device)
     else:
         hardware = f"{platform.machine()}-{torch.backends.cpu.get_cpu_capability()}"
-        if sys.platform == "linux":
-            # As in newer nequip-compile: scalar C++ is faster than vectorised code on
-            # x86 and avoids a torch 2.10-2.11 failure, but slower on Apple silicon
-            env.setdefault("ATEN_CPU_CAPABILITY", "default")
-        hardware += f"-simd_{env.get('ATEN_CPU_CAPABILITY', 'auto')}"
+        # Scalar C++ (newer nequip-compile's default) is faster on x86, avoids a torch
+        # 2.10-2.11 compile failure, and from torch 2.9 avoids vectorised NequIP kernels
+        # opening an OpenMP region per edge (4-14x slower multithreaded on macOS)
+        env.setdefault("ATEN_CPU_CAPABILITY", "default")
+        hardware += f"-simd_{env['ATEN_CPU_CAPABILITY']}"
+        # Compiled kernels keep the thread count they were compiled with, so use ours
+        env["OMP_NUM_THREADS"] = str(torch.get_num_threads())
+        hardware += f"-threads{env['OMP_NUM_THREADS']}"
     if sys.platform == "linux":
         # torch compiles with -march=native here, so also key on the exact host CPU
         cpu = re.findall(
@@ -279,31 +237,25 @@ def _compile_nequip_package(
         )
         cpu_id = hashlib.sha256("\n".join(sorted(set(cpu))).encode()).hexdigest()
         hardware += f"-{cpu_id[:12]}"
-    kernels = sorted({_NEQUIP_KERNEL_PACKAGES[modifier] for modifier in modifiers})
-    key = "-".join(
-        (
-            digest.hexdigest()[:16],
-            device,
-            hardware,
-            mode,
-            *modifiers,
-            *(f"{package}{version(package.replace('_', '-'))}" for package in kernels),
-            f"torch{torch.__version__}",
-            f"nequip{nequip.__version__}",
-        )
-    )
-    name = re.sub(r"[^\w.+-]", "_", key)
+    digest = hashlib.sha256(Path(model).read_bytes()).hexdigest()
+    key = [digest[:16], device, hardware, mode]
+    if modifier:
+        package = _NEQUIP_KERNEL_PACKAGES[modifier]
+        key += [modifier, f"{package}{version(package)}"]
+    key += [f"torch{torch.__version__}", f"nequip{nequip.__version__}"]
+    name = re.sub(r"[^\w.+-]", "_", "-".join(key))
     suffix = ".nequip.pth" if mode == "torchscript" else ".nequip.pt2"
     path = Path.home() / ".cache" / "ml_peg" / "nequip" / "compiled" / f"{name}{suffix}"
-    failed = path.with_name(f"{path.name}.failed")
-    if failed.exists():
-        raise RuntimeError(f"compiling failed before, so delete {failed} to retry")
     if path.exists():
         return str(path)
+    failed = path.with_name(f"{path.name}.failed")
     path.parent.mkdir(parents=True, exist_ok=True)
-    # The lock stops parallel workers compiling the same model; the rename keeps
+    # The lock stops parallel workers compiling the same model (timing out in case a
+    # killed worker leaves it held where flock is unsupported); the rename keeps
     # writes atomic where file locks are not shared, e.g. across nodes
-    with FileLock(f"{path}.lock"):
+    with FileLock(f"{path}.lock", timeout=3600):
+        if failed.exists():
+            raise RuntimeError(f"compiling failed before, so delete {failed} to retry")
         if not path.exists():
             # nequip-compile requires the .nequip.pt2 or .nequip.pth suffix
             with tempfile.NamedTemporaryFile(
@@ -324,7 +276,7 @@ def _compile_nequip_package(
                         device,
                         "--target",
                         "ase",
-                        *(["--modifiers", *modifiers] if modifiers else []),
+                        *(["--modifiers", modifier] if modifier else []),
                     ],
                     check=True,
                     capture_output=True,
@@ -334,7 +286,7 @@ def _compile_nequip_package(
                 partial.replace(path)
             except subprocess.CalledProcessError as error:
                 # Kernel variants fall back to plain compilation, so don't retry them
-                if modifiers:
+                if modifier:
                     failed.write_text(error.stderr[-2000:])
                 raise
             finally:
@@ -349,7 +301,7 @@ def _check_nequip_kernels(compiled: Calculator, eager: Calculator) -> None:
     Parameters
     ----------
     compiled
-        Calculator using a compiled model with GPU kernel modifiers.
+        Calculator using a compiled model with a GPU kernel modifier.
     eager
         Calculator using the eager model, without modifiers.
 
@@ -386,7 +338,8 @@ def _load_nequip_calculator(
 
     In nequip 0.19.1, every load keeps a ``torch.package`` importer and its open file
     alive until the process exits, so loading for each structure exhausts the
-    file-descriptor limit.
+    file-descriptor limit. The first load also makes float64 torch's default dtype,
+    which callers should restore.
 
     Parameters
     ----------
@@ -405,82 +358,95 @@ def _load_nequip_calculator(
     Calculator
         Loaded NequIP ASE calculator.
     """
-    from importlib import import_module
-
     from nequip.data import AtomicDataDict
+    from nequip.integrations.ase import NequIPCalculator
     from nequip.model.modify_utils import get_all_modifiers
     from nequip.utils.dtype import torch_default_dtype
     import torch
 
-    calculator = _float64_nequip_calculator()
+    class MLPEGNequIPCalculator(NequIPCalculator):
+        """
+        ``NequIPCalculator`` with float64 inputs, running tiny structures eagerly.
+
+        NequIP keeps its data (positions, cell) in float64 and runs the model in the
+        package's ``model_dtype``. ``NequIPCalculator`` builds the data with
+        ``torch.get_default_dtype()``, relying on nequip's first load making float64
+        the process-wide default, which ML-PEG restores after loading.
+        """
+
+        def calculate(self, *args: Any, **kwargs: Any) -> None:
+            """
+            Run ``NequIPCalculator.calculate`` with float64 as torch's default dtype.
+
+            Parameters
+            ----------
+            *args
+                Positional arguments for ``NequIPCalculator.calculate``.
+            **kwargs
+                Keyword arguments for ``NequIPCalculator.calculate``.
+            """
+            with torch_default_dtype(torch.float64):
+                super().calculate(*args, **kwargs)
+
+        def call_model(self, data: dict) -> dict:
+            """
+            Run structures too small for compiled models through the eager model.
+
+            Parameters
+            ----------
+            data
+                NequIP input data for one structure.
+
+            Returns
+            -------
+            dict
+                NequIP model outputs.
+            """
+            # TODO: drop this once NequIPCalculator does it itself (planned in nequip)
+            # nequip-compile only supports at least 2 atoms and 2 edges, by default
+            if min(AtomicDataDict.num_nodes(data), AtomicDataDict.num_edges(data)) < 2:
+                return eager.model(data)  # the eager model loaded below
+            return super().call_model(data)
+
     kwargs = json.loads(options)
-    # The first NequIP load makes float64 torch's default dtype; keep the caller's
-    with torch_default_dtype(torch.get_default_dtype()):
-        # Private eager loader: nequip 0.19.1 has no public no-compile constructor
-        eager = calculator._from_saved_model(model, device=device, **kwargs)
-        if not compile:
-            return eager
-        if torch.device(device).index is not None:
+    # Private eager loader: nequip 0.19.1 has no public no-compile constructor
+    eager = MLPEGNequIPCalculator._from_saved_model(model, device=device, **kwargs)
+    if not compile:
+        return eager
+    if torch.device(device).index is not None:
+        warn(
+            f"Using the eager NequIP model, as compiled models need device="
+            f"{torch.device(device).type!r}; choose the GPU with "
+            f"CUDA_VISIBLE_DEVICES rather than {device!r}",
+            stacklevel=2,
+        )
+        return eager
+    modifiers = set(get_all_modifiers(eager.model))
+    for mode, modifier in _nequip_compile_variants(modifiers, device):
+        try:
+            if modifier:
+                # GPU kernel libraries must be imported before loading the model
+                import_module(_NEQUIP_KERNEL_PACKAGES[modifier])
+            path = _compile_nequip_package(model, device, mode, modifier)
+            calc = MLPEGNequIPCalculator.from_compiled_model(
+                path, device=device, **kwargs
+            )
+            if modifier:
+                _check_nequip_kernels(calc, eager)
+            return calc
+        # Compiling needs a C++ compiler, and only changes speed
+        except Exception as error:
+            details = getattr(error, "stderr", None) or repr(error)
             warn(
-                f"Using the eager NequIP model, as compiled models need device="
-                f"{torch.device(device).type!r}; choose the GPU with "
-                f"CUDA_VISIBLE_DEVICES rather than {device!r}",
+                f"Skipping the {mode} NequIP model with "
+                f"{modifier or 'no GPU kernels'}: {details[-2000:]}",
                 stacklevel=2,
             )
-            return eager
-        modifiers = set(get_all_modifiers(eager.model))
-        for mode, kernels in _nequip_compile_variants(modifiers, device):
-            try:
-                for kernel in kernels:
-                    # GPU kernel libraries must be imported before loading the model
-                    import_module(_NEQUIP_KERNEL_PACKAGES[kernel])
-                path = _compile_nequip_package(model, device, mode, kernels)
-                calc = calculator.from_compiled_model(path, device=device, **kwargs)
-                if kernels:
-                    _check_nequip_kernels(calc, eager)
-                break
-            # Compiling needs a C++ compiler, and only changes speed
-            except Exception as error:
-                details = getattr(error, "stderr", None) or repr(error)
-                warn(
-                    f"Compiling the NequIP model ({mode}, modifiers {list(kernels)}) "
-                    f"failed: {details[-2000:]}",
-                    stacklevel=2,
-                )
-        else:
-            warn(
-                "Using the eager NequIP model (set `compile: false` to skip compiling)",
-                stacklevel=2,
-            )
-            return eager
-
-    compiled_call_model = calc.call_model
-
-    def call_model(data: dict) -> dict:
-        """
-        Run structures too small for the compiled model through the eager model.
-
-        Parameters
-        ----------
-        data
-            NequIP input data for one structure.
-
-        Returns
-        -------
-        dict
-            NequIP model outputs.
-        """
-        # TODO: drop this once NequIPCalculator does it itself (planned in nequip)
-        # nequip-compile only supports at least 2 atoms and 2 edges, by default
-        if (
-            data[AtomicDataDict.POSITIONS_KEY].shape[0] < 2
-            or data[AtomicDataDict.EDGE_INDEX_KEY].shape[1] < 2
-        ):
-            return eager.model(data)
-        return compiled_call_model(data)
-
-    calc.call_model = call_model
-    return calc
+    warn(
+        "Using the eager NequIP model (set `compile: false` to skip compiling)",
+        stacklevel=2,
+    )
+    return eager
 
 
 @dataclasses.dataclass(kw_only=True)
@@ -635,8 +601,9 @@ class NequIPCalc(SumCalc):
         **kwargs
             Keyword arguments that override the registry calculator options. ``model``
             is a ``.nequip.zip`` path, or an ``https://`` URL downloaded once and
-            checked against ``sha256``. Other options are passed to the
-            ``NequIPCalculator`` constructors.
+            checked against ``sha256``. Other options are passed to both
+            ``NequIPCalculator`` constructors, but those only the eager loader takes
+            (e.g. ``model_name``) do not reach compiled models.
 
         Returns
         -------
@@ -645,7 +612,8 @@ class NequIPCalc(SumCalc):
         """
         check_precision(precision)
         # Fail before downloading the package if nequip is not installed
-        import nequip
+        from nequip.utils.dtype import torch_default_dtype
+        import torch
 
         calc_kwargs = {
             "chemical_species_to_atom_type_map": True,
@@ -658,8 +626,11 @@ class NequIPCalc(SumCalc):
             model = _download_nequip_package(model, sha256)
         device = Device.resolve_auto() if self.device == Device.AUTO else self.device
         options = json.dumps(calc_kwargs, sort_keys=True)
+        # nequip's first load makes float64 the default dtype (and seeds the RNGs and
+        # sets other torch flags process-wide); keep the caller's dtype
+        with torch_default_dtype(torch.get_default_dtype()):
+            calc = _load_nequip_calculator(model, device, self.compile, options)
         # Copies share the cached model, but not its results or atoms
-        calc = _load_nequip_calculator(model, device, self.compile, options)
         return copy.copy(calc)
 
 

@@ -269,15 +269,11 @@ constituent datasets, not the checkpoint's broader executable type map.
 
 NequIP and Allegro entries use the dedicated ``NequIPCalc`` wrapper, selected by
 the ``NequIPCalculator`` class name. ``kwargs.model`` is a local ``.nequip.zip``
-package or an ``https://`` URL, which is downloaded once to
-``~/.cache/ml_peg/nequip`` and checked against ``kwargs.sha256``. On first use on
-each type of CPU or GPU, the package is compiled and cached, using the
-OpenEquivariance or cuEquivariance GPU kernels its modifiers support on CUDA;
-structures with fewer than two atoms or edges, which compiled models do not
-support, use the eager model. Set a top-level ``compile: false`` (next to
-``device``) to always use the eager model. Packaged models fix their dtype (float32 for the OAM models), so
-``precision`` is ignored. Install with ``uv sync --extra nequip --extra d3``; the
-``nequip`` extra conflicts with ``mace``:
+package or an ``https://`` URL pinned by ``kwargs.sha256``, and other ``kwargs``
+go to the ``NequIPCalculator`` constructors. Packages are compiled on first use,
+and a top-level ``compile: false`` (next to ``device``) uses the eager model
+instead. Packaged models fix their dtype, so ``precision`` is ignored. See
+:doc:`Models </user_guide/models>` for installation, caching and GPU kernels:
 
 .. code-block:: yaml
 
