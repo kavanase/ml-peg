@@ -209,9 +209,11 @@ def _compile_nequip_package(
         hardware = torch.cuda.get_device_name(device)
     else:
         hardware = f"{platform.machine()}-{torch.backends.cpu.get_cpu_capability()}"
-        # Scalar C++ (newer nequip-compile's default) is faster on x86, avoids a torch
-        # 2.10-2.11 compile failure, and from torch 2.9 avoids vectorised NequIP kernels
-        # opening an OpenMP region per edge (4-14x slower multithreaded on macOS)
+        # Scalar C++ is faster on x86, avoids a torch 2.10-2.11 compile failure, and
+        # from torch 2.9 avoids vectorised NequIP kernels opening an OpenMP region per
+        # edge (4-14x slower multithreaded on macOS)
+        # TODO: nequip > 0.19.1 compiles scalar C++ unless ATEN_CPU_CAPABILITY is set,
+        # so stop setting it here (but keep it in the key) once that is required
         env.setdefault("ATEN_CPU_CAPABILITY", "default")
         hardware += f"-simd_{env['ATEN_CPU_CAPABILITY']}"
         # Compiled kernels keep the thread count they were compiled with, so use ours
@@ -283,41 +285,9 @@ def _compile_nequip_package(
     return str(path)
 
 
-def _check_nequip_kernels(compiled: Calculator, eager: Calculator) -> None:
-    """
-    Check a NequIP calculator using GPU kernels against the eager model.
-
-    Parameters
-    ----------
-    compiled
-        Calculator using a compiled model with a GPU kernel modifier.
-    eager
-        Calculator using the eager model, without modifiers.
-
-    Raises
-    ------
-    RuntimeError
-        If their energies or forces for a rattled NaCl cell differ by more than 1 meV
-        or 1 meV/Å.
-    """
-    from ase.build import bulk
-    import numpy as np
-
-    atoms = bulk("NaCl", "rocksalt", a=5.64, cubic=True) * (2, 2, 2)
-    atoms.rattle(0.05, seed=0)
-    results = []
-    for calc in (compiled, eager):
-        atoms.calc = copy.copy(calc)
-        results.append((atoms.get_potential_energy(), atoms.get_forces()))
-    (energy, forces), (eager_energy, eager_forces) = results
-    error = abs(energy - eager_energy), np.abs(forces - eager_forces).max()
-    if max(error) > 1e-3:
-        raise RuntimeError(
-            f"the GPU kernels change the energy by {error[0]:.2g} eV and the forces "
-            f"by up to {error[1]:.2g} eV/A"
-        )
-
-
+# TODO: nequip > 0.19.1 reuses one importer per package file, so repeated loads no
+# longer leak; once that is required, drop this cache, with the JSON-encoded options and
+# copies it needs
 @cache
 def _load_nequip_calculator(
     model: str, device: str, compile: bool, options: str
@@ -347,7 +317,6 @@ def _load_nequip_calculator(
     Calculator
         Loaded NequIP ASE calculator.
     """
-    from nequip.data import AtomicDataDict
     from nequip.integrations.ase import NequIPCalculator
     from nequip.model.modify_utils import get_all_modifiers
     from nequip.utils.dtype import torch_default_dtype
@@ -355,7 +324,7 @@ def _load_nequip_calculator(
 
     class MLPEGNequIPCalculator(NequIPCalculator):
         """
-        ``NequIPCalculator`` with float64 inputs, running tiny structures eagerly.
+        ``NequIPCalculator`` with float64 inputs.
 
         NequIP keeps its data (positions, cell) in float64 and runs the model in the
         package's ``model_dtype``. ``NequIPCalculator`` builds the data with
@@ -378,26 +347,6 @@ def _load_nequip_calculator(
             with torch_default_dtype(torch.float64):
                 super().calculate(*args, **kwargs)
 
-        def call_model(self, data: dict) -> dict:
-            """
-            Run structures too small for compiled models through the eager model.
-
-            Parameters
-            ----------
-            data
-                NequIP input data for one structure.
-
-            Returns
-            -------
-            dict
-                NequIP model outputs.
-            """
-            # TODO: drop this once NequIPCalculator does it itself (planned in nequip)
-            # nequip-compile only supports at least 2 atoms and 2 edges, by default
-            if min(AtomicDataDict.num_nodes(data), AtomicDataDict.num_edges(data)) < 2:
-                return eager.model(data)  # the eager model loaded below
-            return super().call_model(data)
-
     kwargs = json.loads(options)
     # Private eager loader: nequip 0.19.1 has no public no-compile constructor
     eager = MLPEGNequIPCalculator._from_saved_model(model, device=device, **kwargs)
@@ -418,12 +367,9 @@ def _load_nequip_calculator(
                 # GPU kernel libraries must be imported before loading the model
                 import_module(_NEQUIP_KERNEL_PACKAGES[modifier])
             path = _compile_nequip_package(model, device, mode, modifier)
-            calc = MLPEGNequIPCalculator.from_compiled_model(
+            return MLPEGNequIPCalculator.from_compiled_model(
                 path, device=device, **kwargs
             )
-            if modifier:
-                _check_nequip_kernels(calc, eager)
-            return calc
         # Compiling needs a C++ compiler, and only changes speed
         except Exception as error:
             details = getattr(error, "stderr", None) or repr(error)

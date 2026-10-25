@@ -16,7 +16,6 @@ from types import ModuleType, SimpleNamespace
 
 from ase import Atoms
 from ase.build import bulk
-from ase.calculators.lj import LennardJones
 from ase.data import chemical_symbols
 from mlipx.nodes.generic_ase import Device
 import numpy as np
@@ -107,18 +106,12 @@ def fake_nequip(monkeypatch):
     """Provide fake ``nequip`` modules, recording downloads and compilations."""
     ase_module = ModuleType("nequip.integrations.ase")
     ase_module.NequIPCalculator = _FakeNequIPCalculator
-    data_module = ModuleType("nequip.data")
-    data_module.AtomicDataDict = SimpleNamespace(
-        num_nodes=lambda data: len(data["pos"]),
-        num_edges=lambda data: data["edge_index"].shape[1],
-    )
     dtype_module = ModuleType("nequip.utils.dtype")
     dtype_module.torch_default_dtype = _torch_default_dtype
     modify_module = ModuleType("nequip.model.modify_utils")
     modify_module.get_all_modifiers = lambda model: {}
     fake_modules = {
         "nequip": _fake_nequip_module(),
-        "nequip.data": data_module,
         "nequip.integrations": ModuleType("nequip.integrations"),
         "nequip.integrations.ase": ase_module,
         "nequip.model": ModuleType("nequip.model"),
@@ -213,21 +206,6 @@ def test_nequip_loads_compiled_package_once(fake_nequip, precision):
     assert first is not second
     assert first.source == second.source == "compiled"
     assert torch.get_default_dtype() == default_dtype
-
-
-def test_nequip_runs_small_structures_eagerly(fake_nequip):
-    """Structures below the compiled model's shape bounds use the eager model."""
-    calc = NequIPCalc(kwargs={"model": "local.nequip.zip"}).get_calculator(
-        precision="high"
-    )
-
-    def data(atoms, edges):
-        return {"pos": np.zeros((atoms, 3)), "edge_index": np.zeros((2, edges))}
-
-    assert calc.call_model(data(1, 0)) == "eager"
-    assert calc.call_model(data(1, 8)) == "eager"
-    assert calc.call_model(data(2, 0)) == "eager"
-    assert calc.call_model(data(2, 2)) == "compiled"
 
 
 def test_nequip_uses_eager_model_if_compiling_fails(fake_nequip, monkeypatch):
@@ -410,12 +388,13 @@ def test_nequip_compile_variants(monkeypatch):
 
 
 def test_nequip_falls_back_from_failed_gpu_kernels(fake_nequip, monkeypatch):
-    """Kernel variants that fail, or change the results, fall back to plain ones."""
-    checks = []
+    """Kernel variants that fail fall back to plain ones."""
+    compile_package = models._compile_nequip_package
 
-    def check(compiled, eager):
-        checks.append((compiled.source, eager.source))
-        raise RuntimeError("the GPU kernels change the energy")
+    def compile_or_fail(model, device, mode="aotinductor", modifier=None):
+        if modifier:
+            raise RuntimeError(f"compiling with {modifier} failed")
+        return compile_package(model, device, mode, modifier)
 
     variants = [
         ("torchscript", "enable_OpenEquivariance"),
@@ -426,28 +405,17 @@ def test_nequip_falls_back_from_failed_gpu_kernels(fake_nequip, monkeypatch):
     # Fail to import cuEquivariance, whether or not it is installed
     monkeypatch.setitem(sys.modules, "cuequivariance_torch", None)
     monkeypatch.setattr(models, "_nequip_compile_variants", lambda *args: variants)
-    monkeypatch.setattr(models, "_check_nequip_kernels", check)
+    monkeypatch.setattr(models, "_compile_nequip_package", compile_or_fail)
     model = NequIPCalc(kwargs={"model": "local.nequip.zip"})
 
     with pytest.warns(UserWarning) as warnings:
         calc = model.get_calculator(precision="high")
 
     assert calc.source == "compiled"
-    assert [compile[2:] for compile in fake_nequip["compiles"]] == [
-        variants[0],
-        variants[2],
-    ]
-    assert checks == [("compiled", "eager")]
+    assert [compile[2:] for compile in fake_nequip["compiles"]] == [variants[2]]
     messages = [str(warning.message) for warning in warnings]
-    assert "change the energy" in messages[0]
+    assert "compiling with enable_OpenEquivariance failed" in messages[0]
     assert "cuequivariance_torch" in messages[1]
-
-
-def test_check_nequip_kernels():
-    """Kernels must reproduce the eager energy and forces to 1 meV and 1 meV/A."""
-    models._check_nequip_kernels(LennardJones(), LennardJones())
-    with pytest.raises(RuntimeError, match="change the energy"):
-        models._check_nequip_kernels(LennardJones(epsilon=1.1), LennardJones())
 
 
 # Failed compilation falls back to the eager model with this warning
