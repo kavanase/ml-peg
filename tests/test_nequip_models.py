@@ -131,8 +131,8 @@ def fake_nequip(monkeypatch):
 
     calls = {"downloads": [], "compiles": []}
 
-    def download(url, sha256):
-        calls["downloads"].append((url, sha256))
+    def download(url):
+        calls["downloads"].append(url)
         return "cached.nequip.zip"
 
     def compile_package(model, device, mode="aotinductor", modifier=None):
@@ -148,7 +148,7 @@ def fake_nequip(monkeypatch):
 
 
 def test_nequip_registry_metadata():
-    """NequIP entries pin a checksummed package and record their D3 behaviour."""
+    """NequIP entries point at the Zenodo packages and record their D3 behaviour."""
     registry = _registry()
 
     for name in NEQUIP_MODELS:
@@ -161,7 +161,6 @@ def test_nequip_registry_metadata():
         assert config["kwargs"]["model"].startswith(
             "https://zenodo.org/api/records/22349749/"
         )
-        assert len(config["kwargs"]["sha256"]) == 64
 
 
 def test_nequip_registry_records_package_elements():
@@ -191,7 +190,7 @@ def test_nequip_models_use_dedicated_wrapper():
 
 @pytest.mark.parametrize("precision", ["low", "high"])
 def test_nequip_loads_compiled_package_once(fake_nequip, precision):
-    """The wrapper compiles the pinned package and loads it once, handing out copies."""
+    """The wrapper compiles the package and loads it once, handing out copies."""
     import torch
 
     kwargs = _registry()["nequip-oam-s-0p2"]["kwargs"]
@@ -203,7 +202,7 @@ def test_nequip_loads_compiled_package_once(fake_nequip, precision):
 
     device = Device.resolve_auto()
     options = {"device": device, "chemical_species_to_atom_type_map": True}
-    assert fake_nequip["downloads"] == [(kwargs["model"], kwargs["sha256"])] * 2
+    assert fake_nequip["downloads"] == [kwargs["model"]] * 2
     assert fake_nequip["compiles"] == [
         ("cached.nequip.zip", device, "aotinductor", None)
     ]
@@ -272,10 +271,9 @@ def test_nequip_wrapper_round_trips():
     assert NequIPCalc(**params) == model
 
 
-def test_download_checks_sha256_and_caches(monkeypatch, tmp_path):
-    """Packages are cached by sha256 only after their checksum matches."""
+def test_download_caches(monkeypatch, tmp_path):
+    """Packages are downloaded once per URL."""
     content = b"package"
-    sha256 = hashlib.sha256(content).hexdigest()
     calls = []
 
     def get(url, timeout):
@@ -284,16 +282,13 @@ def test_download_checks_sha256_and_caches(monkeypatch, tmp_path):
 
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setattr(requests, "get", get)
-    cached = tmp_path / ".cache" / "ml_peg" / "nequip" / f"{sha256}.nequip.zip"
 
-    for wrong in ("0" * 64, None):
-        with pytest.raises(ValueError, match="Checksum mismatch"):
-            models._download_nequip_package("https://example.org/a", wrong)
-    for _ in range(2):
-        path = models._download_nequip_package("https://example.org/a", sha256)
-        assert path == str(cached)
+    path = models._download_nequip_package("https://example.org/a")
+    assert models._download_nequip_package("https://example.org/a") == path
+    cached = Path(path)
+    assert cached.name.endswith(".nequip.zip")
     assert cached.read_bytes() == content
-    assert calls == ["https://example.org/a"] * 3
+    assert calls == ["https://example.org/a"]
     assert [path.name for path in cached.parent.iterdir()] == [cached.name]
 
 

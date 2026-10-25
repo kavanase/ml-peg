@@ -103,40 +103,29 @@ _NEQUIP_KERNEL_PACKAGES = {
 
 
 # TODO: load the models from nequip.net once it serves the 0.2 packages, replacing this
-# Zenodo download and checksum
-def _download_nequip_package(url: str, sha256: str | None) -> str:
+# Zenodo download
+def _download_nequip_package(url: str) -> str:
     """
-    Download a NequIP package once, checking its sha256, and return the local path.
+    Download a NequIP package once and return the local path.
 
     Parameters
     ----------
     url
         URL of the ``.nequip.zip`` package, e.g. a Zenodo file ``content`` link.
-    sha256
-        Expected sha256 checksum of the package.
 
     Returns
     -------
     str
         Path to the cached package.
-
-    Raises
-    ------
-    ValueError
-        If the downloaded file does not match ``sha256``.
     """
     import requests
 
     # nequip only treats files ending in .nequip.zip as packages
-    path = Path.home() / ".cache" / "ml_peg" / "nequip" / f"{sha256}.nequip.zip"
+    name = hashlib.sha256(url.encode()).hexdigest()[:16]
+    path = Path.home() / ".cache" / "ml_peg" / "nequip" / f"{name}.nequip.zip"
     if not path.exists():
         response = requests.get(url, timeout=60)
         response.raise_for_status()
-        actual = hashlib.sha256(response.content).hexdigest()
-        if actual != sha256:
-            raise ValueError(
-                f"Checksum mismatch for {url}: expected {sha256}, got {actual}"
-            )
         path.parent.mkdir(parents=True, exist_ok=True)
         with tempfile.NamedTemporaryFile(dir=path.parent, delete=False) as file:
             file.write(response.content)
@@ -371,7 +360,8 @@ def _load_nequip_calculator(
         NequIP keeps its data (positions, cell) in float64 and runs the model in the
         package's ``model_dtype``. ``NequIPCalculator`` builds the data with
         ``torch.get_default_dtype()``, relying on nequip's first load making float64
-        the process-wide default, which ML-PEG restores after loading.
+        the process-wide default, which ML-PEG restores after loading. Compiled models
+        silently return infinite energies for float32 data.
         """
 
         def calculate(self, *args: Any, **kwargs: Any) -> None:
@@ -600,10 +590,9 @@ class NequIPCalc(SumCalc):
             native precision.
         **kwargs
             Keyword arguments that override the registry calculator options. ``model``
-            is a ``.nequip.zip`` path, or an ``https://`` URL downloaded once and
-            checked against ``sha256``. Other options are passed to both
-            ``NequIPCalculator`` constructors, but those only the eager loader takes
-            (e.g. ``model_name``) do not reach compiled models.
+            is a ``.nequip.zip`` path, or an ``https://`` URL downloaded once. Other
+            options are passed to both ``NequIPCalculator`` constructors, but those only
+            the eager loader takes (e.g. ``model_name``) do not reach compiled models.
 
         Returns
         -------
@@ -621,9 +610,8 @@ class NequIPCalc(SumCalc):
             **kwargs,
         }
         model = calc_kwargs.pop("model")
-        sha256 = calc_kwargs.pop("sha256", None)
         if model.startswith("https://"):
-            model = _download_nequip_package(model, sha256)
+            model = _download_nequip_package(model)
         device = Device.resolve_auto() if self.device == Device.AUTO else self.device
         options = json.dumps(calc_kwargs, sort_keys=True)
         # nequip's first load makes float64 the default dtype (and seeds the RNGs and
