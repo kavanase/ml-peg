@@ -35,8 +35,15 @@ NEQUIP_MODELS = (
     "allegro-oam-s-0p2",
     "allegro-oam-m-0p2",
     "allegro-oam-l-0p2",
+    "nequip-omat24-s-0p2",
+    "nequip-omat24-m-0p2",
+    "nequip-omat24-l-0p2",
+    "nequip-omat24-xl-0p2",
+    "allegro-omat24-s-0p2",
+    "allegro-omat24-m-0p2",
+    "allegro-omat24-l-0p2",
 )
-# The 89 atom types of every OAM package: H-Bi and Ac-Pu
+# The 89 atom types of every OAM and OMat24 package: H-Bi and Ac-Pu
 OAM_ELEMENTS = set(chemical_symbols[1:84] + chemical_symbols[89:95])
 ROOT = Path(__file__).parents[1]
 # OAM-S energies of the rattled NaCl cell used in the real-model test below
@@ -150,7 +157,8 @@ def test_nequip_registry_metadata():
     for name in NEQUIP_MODELS:
         config = registry[name]
         assert config["class_name"] == "NequIPCalculator"
-        assert config["datasets"] == ["MPtrj", "sAlex", "OMAT"]
+        datasets = ["OMAT"] if "-omat24-" in name else ["MPtrj", "sAlex", "OMAT"]
+        assert config["datasets"] == datasets
         assert config["device"] == "auto"
         assert config["trained_on_dispersion"] is False
         assert "overwrite_dtype" not in config
@@ -160,7 +168,7 @@ def test_nequip_registry_metadata():
 
 
 def test_nequip_registry_records_package_elements():
-    """The registry datasets cover exactly the 89 atom types of the OAM packages."""
+    """The registry datasets cover exactly the 89 atom types of the packages."""
     registry = _registry()
     coverage = json.loads(
         (ROOT / "ml_peg" / "app" / "data" / "element_coverage.json").read_text(

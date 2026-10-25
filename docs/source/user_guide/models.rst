@@ -533,8 +533,7 @@ NequIP and Allegro
 
 Install these float32 models with ``uv sync --extra nequip``. They are compiled
 with ``nequip-compile`` on first use on each machine and thread count, which
-needs a C++ compiler. They are pre-trained on OMat24, fine-tuned on sAlex and
-MPtrj, and are CC-BY-4.0.
+needs a C++ compiler.
 
 nequip-oam-s-0p2
 ----------------
@@ -640,3 +639,108 @@ allegro-oam-l-0p2
      level_of_theory: PBE
      kwargs:
        model: "https://zenodo.org/api/records/22349749/files/Allegro-OAM-L-0.2.nequip.zip/content"
+
+nequip-omat24-s-0p2
+-------------------
+
+.. code-block:: yaml
+
+   nequip-omat24-s-0p2:
+     module: nequip.integrations.ase
+     class_name: NequIPCalculator
+     datasets: [OMAT]
+     device: "auto"
+     trained_on_dispersion: false
+     level_of_theory: PBE
+     kwargs:
+       model: "https://zenodo.org/api/records/22349749/files/NequIP-OMat24-S-0.2.nequip.zip/content"
+
+nequip-omat24-m-0p2
+-------------------
+
+.. code-block:: yaml
+
+   nequip-omat24-m-0p2:
+     module: nequip.integrations.ase
+     class_name: NequIPCalculator
+     datasets: [OMAT]
+     device: "auto"
+     trained_on_dispersion: false
+     level_of_theory: PBE
+     kwargs:
+       model: "https://zenodo.org/api/records/22349749/files/NequIP-OMat24-M-0.2.nequip.zip/content"
+
+nequip-omat24-l-0p2
+-------------------
+
+.. code-block:: yaml
+
+   nequip-omat24-l-0p2:
+     module: nequip.integrations.ase
+     class_name: NequIPCalculator
+     datasets: [OMAT]
+     device: "auto"
+     trained_on_dispersion: false
+     level_of_theory: PBE
+     kwargs:
+       model: "https://zenodo.org/api/records/22349749/files/NequIP-OMat24-L-0.2.nequip.zip/content"
+
+nequip-omat24-xl-0p2
+--------------------
+
+.. code-block:: yaml
+
+   nequip-omat24-xl-0p2:
+     module: nequip.integrations.ase
+     class_name: NequIPCalculator
+     datasets: [OMAT]
+     device: "auto"
+     trained_on_dispersion: false
+     level_of_theory: PBE
+     kwargs:
+       model: "https://zenodo.org/api/records/22349749/files/NequIP-OMat24-XL-0.2.nequip.zip/content"
+
+allegro-omat24-s-0p2
+--------------------
+
+.. code-block:: yaml
+
+   allegro-omat24-s-0p2:
+     module: nequip.integrations.ase
+     class_name: NequIPCalculator
+     datasets: [OMAT]
+     device: "auto"
+     trained_on_dispersion: false
+     level_of_theory: PBE
+     kwargs:
+       model: "https://zenodo.org/api/records/22349749/files/Allegro-OMat24-S-0.2.nequip.zip/content"
+
+allegro-omat24-m-0p2
+--------------------
+
+.. code-block:: yaml
+
+   allegro-omat24-m-0p2:
+     module: nequip.integrations.ase
+     class_name: NequIPCalculator
+     datasets: [OMAT]
+     device: "auto"
+     trained_on_dispersion: false
+     level_of_theory: PBE
+     kwargs:
+       model: "https://zenodo.org/api/records/22349749/files/Allegro-OMat24-M-0.2.nequip.zip/content"
+
+allegro-omat24-l-0p2
+--------------------
+
+.. code-block:: yaml
+
+   allegro-omat24-l-0p2:
+     module: nequip.integrations.ase
+     class_name: NequIPCalculator
+     datasets: [OMAT]
+     device: "auto"
+     trained_on_dispersion: false
+     level_of_theory: PBE
+     kwargs:
+       model: "https://zenodo.org/api/records/22349749/files/Allegro-OMat24-L-0.2.nequip.zip/content"
