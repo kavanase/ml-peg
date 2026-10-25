@@ -39,8 +39,11 @@ NEQUIP_MODELS = (
 # The 89 atom types of every OAM package: H-Bi and Ac-Pu
 OAM_ELEMENTS = set(chemical_symbols[1:84] + chemical_symbols[89:95])
 ROOT = Path(__file__).parents[1]
-# OAM-S energy of the rattled NaCl cell used in the real-model test below
-REFERENCE_ENERGY = -216.15304486661688
+# OAM-S energies of the rattled NaCl cell used in the real-model test below
+REFERENCE_ENERGIES = {
+    "nequip-oam-s-0p2": -216.15304486661688,
+    "allegro-oam-s-0p2": -216.1002435376874,
+}
 
 
 def _registry() -> dict:
@@ -279,7 +282,7 @@ def test_compile_caches_by_package_and_hardware(monkeypatch, tmp_path):
     runs = []
 
     def run(command, **kwargs):
-        runs.append((command, kwargs["env"]))
+        runs.append((command, kwargs["env"], kwargs["cwd"]))
         Path(command[4]).write_bytes(b"compiled")
 
     monkeypatch.setitem(sys.modules, "nequip", _fake_nequip_module())
@@ -291,8 +294,9 @@ def test_compile_caches_by_package_and_hardware(monkeypatch, tmp_path):
     assert models._compile_nequip_package(str(package), "cpu") == str(path)
 
     assert len(runs) == 1
-    command, env = runs[0]
+    command, env, cwd = runs[0]
     assert command[1:4] == ["-m", "nequip.scripts.compile", str(package)]
+    assert cwd == path.parent
     assert command[5:] == [
         "--mode",
         "aotinductor",
@@ -337,6 +341,9 @@ def test_compile_skips_kernel_variants_that_failed(monkeypatch, tmp_path):
     monkeypatch.setitem(sys.modules, "nequip", _fake_nequip_module())
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setattr(subprocess, "run", run)
+    monkeypatch.setattr(
+        models, "packages_distributions", lambda: {"openequivariance": ["oeq-dist"]}
+    )
     monkeypatch.setattr(models, "version", lambda name: "1.0")
     kernel = ("torchscript", "enable_OpenEquivariance")
 
@@ -348,7 +355,7 @@ def test_compile_skips_kernel_variants_that_failed(monkeypatch, tmp_path):
     (failed,) = (tmp_path / ".cache" / "ml_peg" / "nequip" / "compiled").glob(
         "*.failed"
     )
-    assert "openequivariance1.0" in failed.name
+    assert "oeq-dist1.0" in failed.name
     assert failed.read_text() == "no nvcc"
 
     for _ in range(2):
@@ -364,7 +371,7 @@ def test_nequip_compile_variants(monkeypatch):
     nequip = {"enable_OpenEquivariance", "enable_CuEquivariance"}
     allegro = {"enable_CuEquivarianceContracter", "enable_TritonContracter"}
     plain = ("aotinductor", None)
-    installed = {"openequivariance", "cuequivariance_torch"}
+    installed = {"openequivariance", "cuequivariance_ops_torch"}
     monkeypatch.setattr(models, "find_spec", lambda name: name in installed)
     monkeypatch.setattr(torch, "__version__", "2.8.0+cu128")
 
@@ -402,8 +409,8 @@ def test_nequip_falls_back_from_failed_gpu_kernels(fake_nequip, monkeypatch):
         ("aotinductor", None),
     ]
     monkeypatch.setitem(sys.modules, "openequivariance", ModuleType("openequivariance"))
-    # Fail to import cuEquivariance, whether or not it is installed
-    monkeypatch.setitem(sys.modules, "cuequivariance_torch", None)
+    # Fail to import cuEquivariance's CUDA ops, whether or not they are installed
+    monkeypatch.setitem(sys.modules, "cuequivariance_ops_torch", None)
     monkeypatch.setattr(models, "_nequip_compile_variants", lambda *args: variants)
     monkeypatch.setattr(models, "_compile_nequip_package", compile_or_fail)
     model = NequIPCalc(kwargs={"model": "local.nequip.zip"})
@@ -415,18 +422,19 @@ def test_nequip_falls_back_from_failed_gpu_kernels(fake_nequip, monkeypatch):
     assert [compile[2:] for compile in fake_nequip["compiles"]] == [variants[2]]
     messages = [str(warning.message) for warning in warnings]
     assert "compiling with enable_OpenEquivariance failed" in messages[0]
-    assert "cuequivariance_torch" in messages[1]
+    assert "cuequivariance_ops_torch" in messages[1]
 
 
 # Failed compilation falls back to the eager model with this warning
 @pytest.mark.filterwarnings("error:Using the eager NequIP model")
-def test_nequip_oam_s_compiled_matches_eager():
-    """The compiled OAM-S package matches the eager model, including tiny structures."""
+@pytest.mark.parametrize("name", REFERENCE_ENERGIES)
+def test_oam_s_compiled_matches_eager(name):
+    """Compiled OAM-S packages match their eager models, including tiny structures."""
     torch = pytest.importorskip("torch")
     pytest.importorskip("nequip")
     default_dtype = torch.get_default_dtype()
     models._load_nequip_calculator.cache_clear()
-    model = load_models(("nequip-oam-s-0p2",))["nequip-oam-s-0p2"]
+    model = load_models((name,))[name]
     compiled = model.get_calculator(precision="high")
     eager = dataclasses.replace(model, compile=False).get_calculator(precision="high")
 
@@ -440,7 +448,7 @@ def test_nequip_oam_s_compiled_matches_eager():
         cell,
         bulk("Fe", "bcc", a=2.87),
         Atoms("Na"),
-        # No edges beyond the 4.5 A cutoff, then two edges within it
+        # No edges beyond the cutoff, then two edges within it
         Atoms("NaCl", positions=[[0, 0, 0], [0, 0, 10]]),
         Atoms("NaCl", positions=[[0, 0, 0], [0, 0, 2.4]]),
     )
@@ -453,7 +461,7 @@ def test_nequip_oam_s_compiled_matches_eager():
         with _torch_default_dtype(dtype):
             return atoms.get_potential_energy(), atoms.get_forces()
 
-    assert evaluate(eager, cell)[0] == pytest.approx(REFERENCE_ENERGY, abs=1e-3)
+    assert evaluate(eager, cell)[0] == pytest.approx(REFERENCE_ENERGIES[name], abs=1e-3)
     for atoms in structures:
         energy, forces = evaluate(eager, atoms, torch.float64)
         # Without the float64 guard, a float32 default gives NaN compiled results

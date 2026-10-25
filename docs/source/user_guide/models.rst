@@ -531,10 +531,10 @@ sevennet-omni-mpa
 NequIP and Allegro
 ==================
 
-Install these float32 models with ``uv sync --extra nequip``, in a separate
-environment from ``vivace``. They are compiled with ``nequip-compile`` on first
-use on each machine and thread count, which needs a C++ compiler. They are
-pre-trained on OMat24, fine-tuned on sAlex and MPtrj, and are CC-BY-4.0.
+Install these float32 models with ``uv sync --extra nequip``. They are compiled
+with ``nequip-compile`` on first use on each machine and thread count, which
+needs a C++ compiler. They are pre-trained on OMat24, fine-tuned on sAlex and
+MPtrj, and are CC-BY-4.0.
 
 nequip-oam-s-0p2
 ----------------
