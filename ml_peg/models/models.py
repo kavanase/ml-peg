@@ -9,7 +9,7 @@ import dataclasses
 from functools import cache, wraps
 import hashlib
 from importlib import import_module
-from importlib.metadata import version
+from importlib.metadata import packages_distributions, version
 from importlib.util import find_spec
 import json
 import os
@@ -94,11 +94,13 @@ def _patch_metatomic_nvalchemi_max_neighbors() -> None:
     )
 
 
-# Packages providing the GPU kernels of each nequip modifier, in order of preference
+# Modules providing the GPU kernels of each nequip modifier, in order of preference.
+# cuequivariance_torch quietly runs plain PyTorch if its CUDA ops can't load (e.g. the
+# CUDA 12 build with a CUDA 13 torch), so we import the ops themselves
 _NEQUIP_KERNEL_PACKAGES = {
     "enable_OpenEquivariance": "openequivariance",
-    "enable_CuEquivariance": "cuequivariance_torch",
-    "enable_CuEquivarianceContracter": "cuequivariance_torch",
+    "enable_CuEquivariance": "cuequivariance_ops_torch",
+    "enable_CuEquivarianceContracter": "cuequivariance_ops_torch",
 }
 
 
@@ -231,7 +233,7 @@ def _compile_nequip_package(
     digest = hashlib.sha256(Path(model).read_bytes()).hexdigest()
     key = [digest[:16], device, hardware, mode]
     if modifier:
-        package = _NEQUIP_KERNEL_PACKAGES[modifier]
+        package = packages_distributions()[_NEQUIP_KERNEL_PACKAGES[modifier]][0]
         key += [modifier, f"{package}{version(package)}"]
     key += [f"torch{torch.__version__}", f"nequip{nequip.__version__}"]
     name = re.sub(r"[^\w.+-]", "_", "-".join(key))
@@ -259,7 +261,7 @@ def _compile_nequip_package(
                         sys.executable,
                         "-m",
                         "nequip.scripts.compile",
-                        model,
+                        str(Path(model).absolute()),
                         str(partial),
                         "--mode",
                         mode,
@@ -273,6 +275,7 @@ def _compile_nequip_package(
                     capture_output=True,
                     text=True,
                     env=env,
+                    cwd=path.parent,
                 )
                 partial.replace(path)
             except subprocess.CalledProcessError as error:

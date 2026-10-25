@@ -76,10 +76,13 @@ mlipaudit = [
 ]
 nequip = [
     "nequip == 0.19.1",
-    # GPU kernels, used automatically on CUDA
+    # GPU kernels, used automatically on CUDA:
     "openequivariance == 0.7.0; sys_platform == 'linux'",
     "cuequivariance-torch == 0.8.1; sys_platform == 'linux'",
-    "cuequivariance-ops-torch-cu12 == 0.8.1; sys_platform == 'linux'",
+    # These must match torch's CUDA build, which is CUDA 12 for the torch 2.8 locked on
+    # Python >= 3.11, and CUDA 13 for the torch 2.11 locked on Python 3.10:
+    "cuequivariance-ops-torch-cu12 == 0.8.1; sys_platform == 'linux' and python_version >= '3.11'",
+    "cuequivariance-ops-torch-cu13 == 0.8.1; sys_platform == 'linux' and python_version < '3.11'",
 ]
 orb = [
     "orb-models == 0.6.2; sys_platform != 'win32' and python_version >= '3.12'",
@@ -254,6 +257,14 @@ conflicts = [
     [
         { extra = "nequip" },
         { extra = "mace" },
+    ],
+    [
+        { extra = "nequip" },
+        { extra = "dpa" },
+    ],
+    [
+        { extra = "nequip" },
+        { extra = "vivace" },
     ],
 ]
 
